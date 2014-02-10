@@ -102,6 +102,21 @@ class ClonableModelAdmin(ModelAdmin):
                 self.save_model(request, new_object, form, False)
                 self.save_related(request, form, formsets, False)
                 self.log_addition(request, new_object)
+
+                # Dirty dirty Hack For Autodop.pro
+                # How i can resave all related images to the object?
+                # Related object does not created if the form is empty
+                # ImageField expects file object from request, not path to file
+                if hasattr(original_obj, 'positionimage_set'):
+                    for i in original_obj.positionimage_set.all():
+                        obj = i.__class__(
+                            position=new_object,
+                            image=i.image,
+                            image_th=i.image_th,
+                            pos=i.pos
+                        )
+                        obj.save()
+
                 return self.response_add(request, new_object, post_url_continue='../../%s/')
 
         else:
