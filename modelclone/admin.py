@@ -1,3 +1,4 @@
+from django import VERSION
 from django.contrib.admin import ModelAdmin, helpers
 from django.contrib.admin.util import unquote
 from django.conf.urls import patterns, url
@@ -9,7 +10,7 @@ from django.forms.formsets import all_valid
 from django.core.urlresolvers import reverse
 from django.core.exceptions import PermissionDenied
 from django.http import Http404
-from django.db.models.fields.files import ImageFieldFile
+from django.db.models.fields.files import FieldFile
 
 
 __all__ = 'ClonableModelAdmin',
@@ -94,11 +95,14 @@ class ClonableModelAdmin(ModelAdmin):
                 formsets.append(formset)
 
             if all_valid(formsets) and form_validated:
-                # Saves ImageFiles paths from original object
-                for prop, value in vars(original_obj).iteritems():
-                    if isinstance(getattr(original_obj, prop), ImageFieldFile):
-                        setattr(new_object, prop, getattr(original_obj, prop))
-                
+
+                # if original model has any file field, save new model
+                # with same paths to these files
+                for name in vars(original_obj).iterkeys():
+                    field = getattr(original_obj, name)
+                    if isinstance(field, FieldFile) and name not in request.FILES:
+                        setattr(new_object, name, field)
+
                 self.save_model(request, new_object, form, False)
                 self.save_related(request, form, formsets, False)
                 self.log_addition(request, new_object)
@@ -119,6 +123,18 @@ class ClonableModelAdmin(ModelAdmin):
 
                 return self.response_add(request, new_object, post_url_continue='../../%s/')
 
+                if VERSION[1] <= 4:
+                    # Until Django 1.4 giving %s in the url would be replaced with
+                    # object primary key.
+                    # I can't use the default because it goes back only one level
+                    # ('../%s/') and now we are under clone url, so we need one more level
+                    post_url_continue = '../../%s/'
+                else:
+                    # Since 1.5 '%s' was deprecated and if None is given reverse() will
+                    # be used and do the right thing
+                    post_url_continue = None
+                return self.response_add(request, new_object, post_url_continue)
+
         else:
             initial = model_to_dict(original_obj)
             form = ModelForm(initial=initial)
@@ -136,11 +152,14 @@ class ClonableModelAdmin(ModelAdmin):
                     initial.append(model_to_dict(obj, exclude=[obj._meta.pk.name,
                                                                FormSet.fk.name]))
                 formset = FormSet(prefix=prefix, initial=initial)
-                # since there is no way to customize the `extra` in the constructor,
+                # Since there is no way to customize the `extra` in the constructor,
                 # construct the forms again...
                 # most of this view is a hack, but this is the ugliest one
                 formset.extra = len(initial) + formset.extra
-                formset._construct_forms()
+                # _construct_forms() was removed on django 1.6
+                # see https://github.com/django/django/commit/ef79582e8630cb3c119caed52130c9671188addd
+                if hasattr(formset, '_construct_forms'):
+                    formset._construct_forms()
                 formsets.append(formset)
 
         admin_form = helpers.AdminForm(

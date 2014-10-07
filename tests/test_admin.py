@@ -1,19 +1,29 @@
+import shutil
+
 from django.contrib.auth.models import User
 from django.contrib.admin import site as default_admin_site
 from django.core.urlresolvers import reverse
 from django.core.exceptions import PermissionDenied
+from django.core.files import File
+from django.conf import settings
+from django.forms.formsets import DEFAULT_MAX_NUM
 
 from django_webtest import WebTest
+from webtest import Upload
 import mock
 import pytest
 
-from sampleproject.posts.models import Post, Comment, Tag
+from sampleproject.posts.models import Post, Comment, Tag, Multimedia
 from modelclone import ClonableModelAdmin
+
+from .asserts import *
 
 
 class ClonableModelAdminTests(WebTest):
 
     def setUp(self):
+        rm_rf(settings.MEDIA_ROOT)
+        User.objects.all().delete()
         User.objects.create_superuser(
             username='admin',
             password='admin',
@@ -54,6 +64,15 @@ class ClonableModelAdminTests(WebTest):
         self.post_with_tags_url = '/admin/posts/post/{0}/clone/'.format(
             self.post_with_tags.id)
 
+        self.multimedia = Multimedia.objects.create(
+            title = 'Jason Polakow',
+            image = File(open('tests/files/img.jpg')),
+            document = File(open('tests/files/file.txt')),
+        )
+        self.multimedia_url = '/admin/posts/multimedia/{0}/clone/'.format(
+            self.multimedia.id)
+
+
     def test_clone_view_is_wrapped_as_admin_view(self):
         model = mock.Mock()
         admin_site = mock.Mock()
@@ -64,11 +83,13 @@ class ClonableModelAdminTests(WebTest):
 
         assert '<wrapped clone view>' == clone_view_urlpattern.callback
 
+
     def test_clone_view_url_name(self):
         post_id = self.post.id
         expected_url = '/admin/posts/post/{0}/clone/'.format(post_id)
 
         assert reverse('admin:posts_post_clone', args=(post_id,)) == expected_url
+
 
     def test_clone_link_method_for_list_display_renders_object_clone_url(self):
         model_admin = ClonableModelAdmin(Post, default_admin_site)
@@ -78,10 +99,12 @@ class ClonableModelAdminTests(WebTest):
 
         assert model_admin.clone_link(self.post) == expected_link
 
+
     def test_clone_link_methods_for_list_display_should_allow_tags_and_have_short_description(self):
         assert ClonableModelAdmin.clone_link.allow_tags is True
         assert ClonableModelAdmin.clone_link.short_description == \
                ClonableModelAdmin.clone_verbose_name
+
 
     def test_clone_should_display_clone_verbose_name_as_title(self):
         response = self.app.get(self.post_url, user='admin')
@@ -94,10 +117,12 @@ class ClonableModelAdminTests(WebTest):
         assert_content_title(response, 'Clone it! post')
         assert_breadcrums_title(response, 'Clone it! post')
 
+
     def test_clone_should_not_display_delete_button_on_submit_row(self):
         response = self.app.get(self.post_url, user='admin')
 
         refute_delete_button(response)
+
 
     def test_clone_should_raise_permission_denied(self):
         model_admin = ClonableModelAdmin(Post, default_admin_site)
@@ -110,6 +135,7 @@ class ClonableModelAdminTests(WebTest):
             model_admin.clone_view(request, object_id)
 
         model_admin.has_add_permission.assert_called_once_with(request)
+
 
     # clone object
 
@@ -136,13 +162,14 @@ class ClonableModelAdminTests(WebTest):
                                 expect_errors=True)
         assert 404 == response.status_code
 
+
     # clone object with inlines
 
     def test_clone_should_pre_fill_all_form_fields_including_inlines_on_GET(self):
         response = self.app.get(self.post_with_comments_url, user='admin')
 
         # management form data
-        assert_management_form_inputs(response, total=4, initial=0, max_num='')
+        assert_management_form_inputs(response, total=4, initial=0, max_num=DEFAULT_MAX_NUM)
 
         # comment 1
         assert_input(response, name='comment_set-0-author', value='Bob')
@@ -192,7 +219,7 @@ class ClonableModelAdminTests(WebTest):
             assert_input(response, name='comment_set-'+i+'-id', value='')
             assert_input(response, name='comment_set-'+i+'-post', value='')
 
-        assert_management_form_inputs(response, total=4+extra, initial=0, max_num='')
+        assert_management_form_inputs(response, total=4+extra, initial=0, max_num=DEFAULT_MAX_NUM)
 
 
     def test_clone_should_create_new_object_with_inlines_on_POST(self):
@@ -249,82 +276,53 @@ class ClonableModelAdminTests(WebTest):
         assert not tag1_option.get('selected')
         assert tag2_option.get('selected')
 
-# asserts
 
-def assert_input(response, name, value=None):
-    '''
-    Verify if the input with ``name`` exists in ``response``
+    def test_clone_save_and_continue_editing_should_redirect_to_new_object_edit_page(self):
+        response = self.app.get(self.post_url, user='admin')
+        response = response.form.submit('_continue')
 
-    If value is not None, assert the input value is ``value``
-    '''
-    field = cssselect_input_or_textarea(response, name)
+        new_id = Post.objects.latest('id').id
 
-    if len(field) == 0:
-        assert 0, 'No field found with name "{0}"'.format(name)
-    if len(field) > 1:
-        assert 0, 'Expected 1 field with name "{0}", found {1}'.format(name, len(field))
+        assert 302 == response.status_code
+        assert 'http://testserver/admin/posts/post/{0}/'.format(new_id) == response['Location']
 
-    if value is None:
-        return
 
-    field = field[0]
+    # clone with images and files
 
-    if field.tag == 'input':
-        try:
-            found_value = field.attrib['value'].strip()
-        except KeyError:
-            if not value: # no value was expected here, so it's ok
-                return
-            assert 0, 'Field "{0}" has no value, expected "{1}"'.format(name, value)
-    elif field.tag == 'textarea':
-        found_value = field.text_content().strip()
-    else:
-        assert 0, 'Unexpected field type: {0}'.format(field.tag)
+    def test_clone_should_keep_file_path_from_original_object(self):
+        response = self.app.get(self.multimedia_url, user='admin')
 
-    assert found_value == str(value), 'Expected value="{0}" for field "{1}", found "{2}"'.format(
-        value, name, found_value)
+        image = select_element(response, '.field-image p.file-upload a')
+        document = select_element(response, '.field-document p.file-upload a')
 
-def refute_input(response, name):
-    '''
-    Make sure input with ``name`` doesn't exist in ``response``
+        assert '/media/images/img.jpg' == image.get('href')
+        assert '/media/documents/file.txt' == document.get('href')
 
-    '''
-    field = cssselect_input_or_textarea(response, name)
 
-    if len(field) > 0:
-        assert 0, 'Expected no fields with name "{0}", found {1}'.format(name, len(field))
+    def test_clone_should_keep_file_path_from_original_object_on_submit(self):
+        response = self.app.get(self.multimedia_url, user='admin')
+        response.form.submit()
 
-def assert_page_title(response, title):
-    elem = response.lxml.cssselect('title')
-    assert elem[0].text_content().strip() == title
+        multimedia = Multimedia.objects.latest('id')
 
-def assert_content_title(response, title):
-    elem = response.lxml.cssselect('#content h1')
-    assert len(elem) > 0, 'No titles found in content'
-    assert elem[0].text_content().strip() == title
+        assert 'images/img.jpg' == str(multimedia.image)
+        assert 'documents/file.txt' == str(multimedia.document)
 
-def assert_breadcrums_title(response, title):
-    elem = response.lxml.cssselect('.breadcrumbs')
-    assert len(elem) > 0, 'No .breadcrumbs found'
-    assert title in elem[0].text_content()
 
-def cssselect_input_or_textarea(response, name):
-    field = response.lxml.cssselect('input[name={0}]'.format(name))
-    if len(field) == 0:
-        field = response.lxml.cssselect('textarea[name={0}]'.format(name))
-    return field
+    def test_clone_should_override_file_from_original_object_on_submit_if_new_file_was_chosen(self):
+        response = self.app.get(self.multimedia_url, user='admin')
+        response.form['image'] = Upload('tests/files/img-2.jpg')
+        response.form['document'] = Upload('tests/files/file-2.txt')
+        response.form.submit()
 
-def assert_management_form_inputs(response, total, initial, max_num):
-    assert_input(response, name='comment_set-TOTAL_FORMS', value=total)
-    assert_input(response, name='comment_set-INITIAL_FORMS', value=initial)
-    assert_input(response, name='comment_set-MAX_NUM_FORMS', value=max_num)
+        multimedia = Multimedia.objects.latest('id')
 
-def refute_delete_button(response):
-    elem = response.lxml.cssselect('.submit-row .deletelink-box')
-    assert len(elem) > 0, "Found delete button, should not exist"
+        assert 'images/img-2.jpg' == str(multimedia.image)
+        assert 'documents/file-2.txt' == str(multimedia.document)
 
-def select_element(response, selector):
-    elements = response.lxml.cssselect(selector)
-    assert len(elements) == 1, "Expected 1 element for selector '{0}', found {1}".format(
-            selector, len(elements))
-    return elements[0]
+
+def rm_rf(path):
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        pass
