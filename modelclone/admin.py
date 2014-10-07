@@ -121,8 +121,6 @@ class ClonableModelAdmin(ModelAdmin):
                         )
                         obj.save()
 
-                return self.response_add(request, new_object, post_url_continue='../../%s/')
-
                 if VERSION[1] <= 4:
                     # Until Django 1.4 giving %s in the url would be replaced with
                     # object primary key.
